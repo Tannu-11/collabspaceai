@@ -6,17 +6,22 @@ import { useAuth } from '../context/AuthContext';
 const COLORS = ['#2563eb','#16a34a','#7c3aed','#d97706','#dc2626','#0891b2'];
 const gc = n => COLORS[n?.charCodeAt(0) % COLORS.length];
 const EMOJIS = ['👍','👎','❤️','🔥','😂','🎉','👀','🙌'];
+const INPUT_EMOJIS = ['😀', '😂', '🥺', '😎', '😍', '🤔', '🙌', '👍', '👎', '🔥', '❤️', '🎉', '✨', '😭', '😡', '✅'];
 
 // Module-level socket so it persists across re-renders
 let socketInstance = null;
 
-export default function ChatBox({ projectId, onClose }) {
+export default function ChatBox({ projectId, members = [], onClose }) {
   const { user } = useAuth();
   const [msgs, setMsgs] = useState([]);
   const [text, setText] = useState('');
   const [live, setLive] = useState(false);
   const [hoveredMsg, setHoveredMsg] = useState(null);
   const [pickerFor, setPickerFor]   = useState(null);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [showMentions, setShowMentions] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [mentionIndex, setMentionIndex] = useState(0);
   const bottomRef = useRef();
   const inputRef  = useRef();
   const socketRef = useRef(null);
@@ -102,6 +107,64 @@ export default function ChatBox({ projectId, onClose }) {
   const react = (msgId, emoji) => {
     socketRef.current.emit('reactMessage', { messageId: msgId, emoji, userId: user.id, projectId });
     setPickerFor(null);
+  };
+
+  const handleTextChange = (e) => {
+    const val = e.target.value;
+    setText(val);
+    
+    const cursor = e.target.selectionStart;
+    const textBeforeCursor = val.slice(0, cursor);
+    const lastWord = textBeforeCursor.split(/\s/).pop();
+
+    if (lastWord && lastWord.startsWith('@')) {
+      setShowMentions(true);
+      setMentionQuery(lastWord.slice(1).toLowerCase());
+      setMentionIndex(0);
+    } else {
+      setShowMentions(false);
+    }
+  };
+
+  const filteredMembers = members.filter(m => m.name.toLowerCase().includes(mentionQuery));
+
+  const handleSelectMention = (member) => {
+    const cursor = inputRef.current.selectionStart;
+    const textBeforeCursor = text.slice(0, cursor);
+    const textAfterCursor = text.slice(cursor);
+    const wordsBefore = textBeforeCursor.split(/\s/);
+    wordsBefore.pop(); // remove the @query part
+    const newTextBefore = wordsBefore.join(' ') + (wordsBefore.length > 0 ? ' ' : '') + `@${member.name} `;
+    
+    setText(newTextBefore + textAfterCursor);
+    setShowMentions(false);
+    
+    setTimeout(() => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.selectionStart = newTextBefore.length;
+        inputRef.current.selectionEnd = newTextBefore.length;
+      }
+    }, 0);
+  };
+
+  const handleKeyDown = (e) => {
+    if (showMentions && filteredMembers.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMentionIndex(prev => (prev + 1) % filteredMembers.length);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMentionIndex(prev => (prev - 1 + filteredMembers.length) % filteredMembers.length);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        handleSelectMention(filteredMembers[mentionIndex]);
+      } else if (e.key === 'Escape') {
+        setShowMentions(false);
+      }
+      return;
+    }
+    if (e.key === 'Enter' && !e.shiftKey) send(e);
   };
 
   return (
@@ -234,14 +297,85 @@ export default function ChatBox({ projectId, onClose }) {
       </div>
 
       <form onSubmit={send} style={s.input}>
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+          
+          {showMentions && filteredMembers.length > 0 && (
+            <div style={{
+              position: 'absolute', bottom: '100%', left: '0', width: '200px',
+              background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)',
+              boxShadow: 'var(--shadow-lg)', zIndex: 10, padding: '4px', marginBottom: '8px',
+              maxHeight: '150px', overflowY: 'auto'
+            }}>
+              {filteredMembers.map((m, idx) => (
+                <div 
+                  key={m._id} 
+                  onClick={() => handleSelectMention(m)}
+                  style={{
+                    padding: '8px', cursor: 'pointer', borderRadius: 'var(--radius)',
+                    background: idx === mentionIndex ? 'var(--blue-dim)' : 'transparent',
+                    color: idx === mentionIndex ? 'var(--blue)' : 'var(--text)',
+                    fontSize: '13px', fontWeight: '500'
+                  }}
+                  onMouseEnter={() => setMentionIndex(idx)}
+                >
+                  {m.name}
+                </div>
+              ))}
+            </div>
+          )}
+          <button 
+            type="button" 
+            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+            style={{ 
+              background: 'transparent', border: 'none', cursor: 'pointer',
+              fontSize: '20px', padding: '4px', display: 'flex', alignItems: 'center',
+              color: showEmojiPicker ? 'var(--blue)' : 'var(--text3)',
+              transition: 'transform 0.1s'
+            }}
+            onMouseEnter={ev => ev.target.style.transform = 'scale(1.1)'}
+            onMouseLeave={ev => ev.target.style.transform = 'scale(1)'}
+          >
+            😀
+          </button>
+          
+          {showEmojiPicker && (
+            <div style={{
+              position: 'absolute', bottom: '100%', left: '0', marginBottom: '12px',
+              background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)',
+              padding: '8px', display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px',
+              boxShadow: 'var(--shadow-lg)', zIndex: 10
+            }}>
+               {INPUT_EMOJIS.map(e => (
+                 <button 
+                   key={e} 
+                   type="button" 
+                   onClick={() => { 
+                     setText(prev => prev + e); 
+                     setShowEmojiPicker(false); 
+                     inputRef.current?.focus(); 
+                   }} 
+                   style={{ 
+                     background: 'none', border: 'none', fontSize: '20px', 
+                     cursor: 'pointer', padding: '6px', transition: 'transform 0.1s',
+                     display: 'flex', justifyContent: 'center', alignItems: 'center'
+                   }} 
+                   onMouseEnter={ev => ev.target.style.transform = 'scale(1.2)'} 
+                   onMouseLeave={ev => ev.target.style.transform = 'scale(1)'}
+                 >
+                   {e}
+                 </button>
+               ))}
+            </div>
+          )}
+        </div>
         <input
           ref={inputRef}
           value={text}
-          onChange={e => setText(e.target.value)}
+          onChange={handleTextChange}
           placeholder={live ? 'Send a message...' : 'Connecting...'}
           disabled={!live}
           style={{ flex: 1, borderRadius: '10px', fontSize: '13px' }}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) send(e); }}
+          onKeyDown={handleKeyDown}
         />
         <button
           type="submit"
@@ -286,7 +420,7 @@ const s = {
     flexShrink: 0,
   },
   input: {
-    display: 'flex', gap: '8px',
+    display: 'flex', gap: '8px', alignItems: 'center',
     padding: '12px', borderTop: '1px solid var(--border)',
     background: 'var(--bg2)',
   },

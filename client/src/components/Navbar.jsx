@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
 import API from '../api/axios';
+import { io } from 'socket.io-client';
 
 function getDeadlineStatus(deadline) {
   if (!deadline) return null;
@@ -25,6 +26,7 @@ export default function Navbar({ onAIOpen }) {
   const [showUserMenu, setShowUserMenu]   = useState(false);
   const notifRef = useRef();
   const userMenuRef = useRef();
+  const socketRef = useRef(null);
 
   // Apply theme to <html>
   useEffect(() => {
@@ -38,13 +40,32 @@ export default function Navbar({ onAIOpen }) {
     if (saved) document.documentElement.setAttribute('data-theme', saved);
   }, []);
 
-  // Build notifications from projects + tasks
+  // Build notifications from projects + tasks + DB
   useEffect(() => {
+    if (!user) return;
+    
     const load = async () => {
       try {
-        const { data: projs } = await API.get('/projects');
+        const [{ data: projs }, { data: dbNotifs }] = await Promise.all([
+          API.get('/projects'),
+          API.get('/notifications').catch(() => ({ data: [] }))
+        ]);
         setProjects(projs);
         const notifs = [];
+
+        // Add DB notifications
+        dbNotifs.forEach(n => {
+          notifs.push({
+            id: n._id,
+            type: 'mention',
+            icon: '💬',
+            title: `Mentioned by ${n.sender?.name}`,
+            body: n.message,
+            projectId: n.project?._id || n.project,
+            isRead: n.isRead,
+            dbId: n._id
+          });
+        });
 
         for (const p of projs) {
           const { data: tasks } = await API.get(`/tasks/${p._id}`);
@@ -102,7 +123,37 @@ export default function Navbar({ onAIOpen }) {
       }
     };
     load();
-  }, []);
+
+    // Socket Connection for Real-time Notifications
+    if (!socketRef.current) {
+      socketRef.current = io('http://localhost:5000', { transports: ['websocket'] });
+      
+      socketRef.current.on('connect', () => {
+        socketRef.current.emit('joinUserRoom', user.id);
+      });
+      
+      socketRef.current.on('notification', (n) => {
+        toast(`🔔 ${n.sender?.name} mentioned you in ${n.project?.name}`);
+        setNotifications(prev => [{
+          id: n._id,
+          type: 'mention',
+          icon: '💬',
+          title: `Mentioned by ${n.sender?.name}`,
+          body: n.message,
+          projectId: n.project?._id || n.project,
+          isRead: n.isRead,
+          dbId: n._id
+        }, ...prev]);
+      });
+    }
+
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
+    };
+  }, [user]);
 
   // Close panels on outside click
   useEffect(() => {
@@ -124,12 +175,26 @@ export default function Navbar({ onAIOpen }) {
     navigate('/login');
   };
 
-  const urgentCount = notifications.filter(n => n.type === 'urgent' || n.type === 'warn').length;
+  const handleNotifClick = async (n) => {
+    if (n.dbId && !n.isRead) {
+      try {
+        await API.put(`/notifications/${n.dbId}/read`);
+        setNotifications(prev => prev.map(p => p.id === n.id ? { ...p, isRead: true } : p));
+      } catch {}
+    }
+    if (n.projectId) {
+      navigate(`/project/${n.projectId}`);
+      setNotifOpen(false);
+    }
+  };
+
+  const unreadCount = notifications.filter(n => (n.dbId && !n.isRead) || n.type === 'urgent' || n.type === 'warn').length;
 
   const notifColors = {
-    urgent: { bg: 'var(--red-dim)',   border: 'var(--red-border)',   color: 'var(--red)',   dot: '#dc2626' },
-    warn:   { bg: 'var(--amber-dim)', border: 'var(--amber-border)', color: 'var(--amber)', dot: '#d97706' },
-    info:   { bg: 'var(--blue-dim)',  border: 'var(--blue-border)',  color: 'var(--blue)',  dot: '#2563eb' },
+    urgent:  { bg: 'var(--red-dim)',   border: 'var(--red-border)',   color: 'var(--red)',   dot: '#dc2626' },
+    warn:    { bg: 'var(--amber-dim)', border: 'var(--amber-border)', color: 'var(--amber)', dot: '#d97706' },
+    info:    { bg: 'var(--blue-dim)',  border: 'var(--blue-border)',  color: 'var(--blue)',  dot: '#2563eb' },
+    mention: { bg: 'var(--purple-dim)',border: 'var(--purple-border)',color: 'var(--purple)',dot: '#7c3aed' },
   };
 
   return (
@@ -197,9 +262,9 @@ export default function Navbar({ onAIOpen }) {
             }}
             title="Notifications"
           >
-            <span style={{ fontSize: '16px', animation: urgentCount > 0 ? 'bellShake 2s ease-in-out infinite' : 'none' }}>🔔</span>
-            {urgentCount > 0 && (
-              <span style={s.badge}>{urgentCount}</span>
+            <span style={{ fontSize: '16px', animation: unreadCount > 0 ? 'bellShake 2s ease-in-out infinite' : 'none' }}>🔔</span>
+            {unreadCount > 0 && (
+              <span style={s.badge}>{unreadCount}</span>
             )}
           </button>
 
@@ -223,13 +288,14 @@ export default function Navbar({ onAIOpen }) {
                     return (
                       <div
                         key={n.id}
-                        onClick={() => { n.projectId && navigate(`/project/${n.projectId}`); setNotifOpen(false); }}
+                        onClick={() => handleNotifClick(n)}
                         style={{
                           padding: '12px 16px',
                           borderBottom: '1px solid var(--border)',
                           cursor: n.projectId ? 'pointer' : 'default',
                           display: 'flex', gap: '10px', alignItems: 'flex-start',
                           transition: 'background 0.12s',
+                          opacity: n.isRead ? 0.6 : 1,
                         }}
                         onMouseEnter={e => { if (n.projectId) e.currentTarget.style.background = 'var(--bg3)'; }}
                         onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
@@ -294,26 +360,45 @@ export default function Navbar({ onAIOpen }) {
               background: 'var(--bg2)', border: '1px solid var(--border)',
               borderRadius: '12px', padding: '8px',
               boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)',
-              zIndex: 100, minWidth: '220px',
+              zIndex: 100, minWidth: '240px',
             }}>
               <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', marginBottom: '8px' }}>
                 <span style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text)', display: 'block' }}>{user?.name}</span>
                 <span style={{ fontSize: '11px', color: 'var(--text3)' }}>{user?.email}</span>
               </div>
               
-              <button 
-                className="btn btn-ghost" style={s.menuItem} 
-                onClick={() => { toast('Multi-account feature coming soon!'); setShowUserMenu(false); }}
-              >
-                <span style={{ fontSize: '14px' }}>➕</span> Add account
-              </button>
-              
-              <button 
-                className="btn btn-ghost" style={s.menuItem} 
-                onClick={() => { toast('Multi-account feature coming soon!'); setShowUserMenu(false); }}
-              >
-                <span style={{ fontSize: '14px' }}>🔄</span> Switch accounts
-              </button>
+              <div style={{ padding: '8px 12px' }}>
+                <div style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span>📊</span> Activity Feed
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {projects.length === 0 ? (
+                    <div style={{ fontSize: '11px', color: 'var(--text3)', textAlign: 'center', padding: '8px 0' }}>
+                      No projects active
+                    </div>
+                  ) : (
+                    projects.slice(0, 3).map(p => {
+                      // Stable mock hours based on project ID for UI demonstration
+                      const mockHours = (p._id.charCodeAt(p._id.length - 1) % 5) + 1;
+                      const dateStr = new Date(p.updatedAt || p.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                      
+                      return (
+                        <div key={p._id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '12px' }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', overflow: 'hidden' }}>
+                            <span style={{ color: 'var(--text)', fontWeight: '500', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '140px' }}>
+                              {p.name}
+                            </span>
+                            <span style={{ color: 'var(--text3)', fontSize: '10px' }}>{dateStr}</span>
+                          </div>
+                          <span style={{ color: 'var(--blue)', fontWeight: '600', background: 'var(--blue-dim)', padding: '2px 6px', borderRadius: '4px', flexShrink: 0 }}>
+                            {mockHours} hrs
+                          </span>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
               
               <div style={{ height: '1px', background: 'var(--border)', margin: '8px 0' }} />
               

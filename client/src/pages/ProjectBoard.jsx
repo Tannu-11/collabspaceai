@@ -37,6 +37,8 @@ export default function ProjectBoard() {
   const [aiExpanded, setAiExpanded]     = useState(false);
   const [showAI, setShowAI]             = useState(false);
   const [taskTab, setTaskTab]           = useState('all');
+  const [files, setFiles]               = useState([]);
+  const [isDragging, setIsDragging]     = useState(false);
   const aiRef = useRef(null);
 
   // Close AI dropdown when clicking outside
@@ -49,11 +51,16 @@ export default function ProjectBoard() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [pr, tr] = await Promise.all([API.get('/projects'), API.get(`/tasks/${id}`)]);
+        const [pr, tr, fr] = await Promise.all([
+          API.get('/projects'), 
+          API.get(`/tasks/${id}`),
+          API.get(`/files/${id}`).catch(() => ({ data: [] }))
+        ]);
         const found = pr.data.find(p => p._id === id);
         if (!found) { navigate('/'); return; }
         setProject(found);
         setTasks(tr.data);
+        setFiles(fr.data);
       } catch { toast.error('Failed to load project'); }
       finally { setLoading(false); }
     };
@@ -93,6 +100,17 @@ export default function ProjectBoard() {
       });
     });
 
+    socket.on('fileUploaded', file => {
+      setFiles(prev => {
+        if (prev.some(f => f._id === file._id)) return prev;
+        return [file, ...prev];
+      });
+    });
+
+    socket.on('fileDeleted', fileId => {
+      setFiles(prev => prev.filter(f => f._id !== fileId));
+    });
+
     return () => {
       socket.disconnect();
     };
@@ -112,6 +130,33 @@ export default function ProjectBoard() {
       setProject(data); setMemEmail(''); setAddMem(false);
       toast.success('Member added!');
     } catch (err) { toast.error(err.response?.data?.message || 'User not found'); }
+  };
+
+  const handleDragOver = (e) => { e.preventDefault(); setIsDragging(true); };
+  const handleDragLeave = (e) => { e.preventDefault(); setIsDragging(false); };
+  const handleDrop = async (e) => {
+    e.preventDefault(); setIsDragging(false);
+    const uploadedFiles = e.dataTransfer.files;
+    if (!uploadedFiles.length) return;
+    
+    for (let i = 0; i < uploadedFiles.length; i++) {
+      const formData = new FormData();
+      formData.append('file', uploadedFiles[i]);
+      try {
+        const { data } = await API.post(`/files/${id}`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+        setFiles(prev => [data, ...prev]);
+        toast.success(`Uploaded ${uploadedFiles[i].name}`);
+      } catch (err) { toast.error(`Failed to upload ${uploadedFiles[i].name}`); }
+    }
+  };
+
+  const deleteFile = async (fid) => {
+    if (!confirm('Delete file?')) return;
+    try {
+      await API.delete(`/files/${fid}`);
+      setFiles(prev => prev.filter(f => f._id !== fid));
+      toast.success('Deleted');
+    } catch { toast.error('Failed to delete'); }
   };
 
   // AI Task Generator
@@ -259,6 +304,10 @@ export default function ProjectBoard() {
               {isLeader ? '👑 Leader' : '👤 Member'}
             </span>
 
+            <button className="btn btn-secondary btn-sm" onClick={() => setPanel(panel==='upload'?null:'upload')}
+              style={{ borderColor: panel==='upload' ? 'var(--blue)' : undefined }}>
+              📁 Upload
+            </button>
             <button className="btn btn-secondary btn-sm" onClick={() => setPanel(panel==='chat'?null:'chat')}
               style={{ borderColor: panel==='chat' ? 'var(--blue)' : undefined }}>
               💬 Chat
@@ -403,61 +452,116 @@ export default function ProjectBoard() {
 
         {/* Main: Board + Panel */}
         <div style={{ display: 'grid', gridTemplateColumns: panel ? '1fr 340px' : '1fr', gap: '16px', alignItems: 'start' }}>
+          
           {/* Kanban */}
           <DragDropContext onDragEnd={onDragEnd}>
-            <div style={{
-              ...s.board,
-              gridTemplateColumns: (taskTab === 'all' || taskTab === 'assigned') ? 'repeat(3,1fr)' : '1fr',
-            }}>
-              {COLS.filter(col => taskTab === 'all' || taskTab === 'assigned' || col.id === taskTab).map((col, ci) => (
-                <div key={col.id} style={s.col} className={`fade-up d${ci+2}`}>
-                  <div style={s.colHead}>
-                    <div style={s.colLeft}>
-                      <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: col.color, boxShadow: `0 0 6px ${col.color}` }} />
-                      <span style={s.colLabel}>{col.label}</span>
-                    </div>
-                    <span style={{ ...s.colBadge, background: col.dim, color: col.color }}>
-                      {colTasks(col.id).length}
-                    </span>
-                  </div>
-                  <Droppable droppableId={col.id}>
-                    {(prov, snap) => (
-                      <div ref={prov.innerRef} {...prov.droppableProps}
-                        style={{ ...s.drop, background: snap.isDraggingOver ? col.dim : 'transparent', borderColor: snap.isDraggingOver ? col.color + '30' : 'transparent' }}>
-                        {colTasks(col.id).map((task, idx) => {
-                          const isMine = (task.assignedTo?._id || task.assignedTo) === user.id;
-                          const canDrag = isLeader || isMine;
-                          return (
-                            <Draggable key={task._id} draggableId={task._id} index={idx} isDragDisabled={!canDrag}>
-                              {(prov2, snap2) => (
-                              <div ref={prov2.innerRef} {...prov2.draggableProps} {...prov2.dragHandleProps}
-                                style={{ ...prov2.draggableProps.style, opacity: snap2.isDragging ? 0.8 : 1 }}>
-                                <TaskCard task={task} isLeader={isLeader}
-                                  onEdit={t => setEditTask(t)}
-                                  onDelete={did => setTasks(p => p.filter(t => t._id !== did))} />
-                              </div>
-                            )}
-                          </Draggable>
-                        );
-                      })}
-                      {prov.placeholder}
-                        {colTasks(col.id).length === 0 && !snap.isDraggingOver && (
-                          <div style={s.emptyCol}>
-                            <p style={{ color: 'var(--text3)', fontSize: '12px' }}>No tasks</p>
-                          </div>
-                        )}
+              <div style={{
+                ...s.board,
+                gridTemplateColumns: (taskTab === 'all' || taskTab === 'assigned') ? 'repeat(3,1fr)' : '1fr',
+              }}>
+                {COLS.filter(col => taskTab === 'all' || taskTab === 'assigned' || col.id === taskTab).map((col, ci) => (
+                  <div key={col.id} style={s.col} className={`fade-up d${ci+2}`}>
+                    <div style={s.colHead}>
+                      <div style={s.colLeft}>
+                        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: col.color, boxShadow: `0 0 6px ${col.color}` }} />
+                        <span style={s.colLabel}>{col.label}</span>
                       </div>
-                    )}
-                  </Droppable>
-                </div>
-              ))}
-            </div>
-          </DragDropContext>
+                      <span style={{ ...s.colBadge, background: col.dim, color: col.color }}>
+                        {colTasks(col.id).length}
+                      </span>
+                    </div>
+                    <Droppable droppableId={col.id}>
+                      {(prov, snap) => (
+                        <div ref={prov.innerRef} {...prov.droppableProps}
+                          style={{ ...s.drop, background: snap.isDraggingOver ? col.dim : 'transparent', borderColor: snap.isDraggingOver ? col.color + '30' : 'transparent' }}>
+                          {colTasks(col.id).map((task, idx) => {
+                            const isMine = (task.assignedTo?._id || task.assignedTo) === user.id;
+                            const canDrag = isLeader || isMine;
+                            return (
+                              <Draggable key={task._id} draggableId={task._id} index={idx} isDragDisabled={!canDrag}>
+                                {(prov2, snap2) => (
+                                <div ref={prov2.innerRef} {...prov2.draggableProps} {...prov2.dragHandleProps}
+                                  style={{ ...prov2.draggableProps.style, opacity: snap2.isDragging ? 0.8 : 1 }}>
+                                  <TaskCard task={task} isLeader={isLeader}
+                                    onEdit={t => setEditTask(t)}
+                                    onDelete={did => setTasks(p => p.filter(t => t._id !== did))} />
+                                </div>
+                              )}
+                            </Draggable>
+                          );
+                        })}
+                        {prov.placeholder}
+                          {colTasks(col.id).length === 0 && !snap.isDraggingOver && (
+                            <div style={s.emptyCol}>
+                              <p style={{ color: 'var(--text3)', fontSize: '12px' }}>No tasks</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </Droppable>
+                  </div>
+                ))}
+              </div>
+            </DragDropContext>
 
           {/* Side Panel */}
+          {panel === 'upload' && (
+            <div style={s.sidePanel} className="fade-up">
+              <div 
+                onDragOver={handleDragOver} 
+                onDragLeave={handleDragLeave} 
+                onDrop={handleDrop}
+                style={{
+                  ...s.filesZone,
+                  borderColor: isDragging ? 'var(--blue)' : 'var(--border)',
+                  background: isDragging ? 'var(--blue-dim)' : 'var(--bg2)',
+                  minHeight: '100%',
+                  display: 'flex', flexDirection: 'column'
+                }}
+              >
+                <div style={{ textAlign: 'center', padding: '20px', borderBottom: '1px solid var(--border)' }}>
+                  <span style={{ fontSize: '28px', display: 'block', marginBottom: '8px' }}>📁</span>
+                  <h3 style={{ fontSize: '15px', fontWeight: '700', color: 'var(--text)', marginBottom: '4px' }}>Project Files</h3>
+                  <p style={{ fontSize: '12px', color: 'var(--text3)' }}>Drag & drop any file here (JPG, PDF, Video, PPT)</p>
+                  
+                  {/* Fallback browse button */}
+                  <label className="btn btn-primary btn-sm" style={{ marginTop: '12px', cursor: 'pointer', display: 'inline-block' }}>
+                    Browse Files
+                    <input type="file" multiple onChange={(e) => handleDrop({ preventDefault: ()=>{}, dataTransfer: { files: e.target.files }})} style={{ display: 'none' }} />
+                  </label>
+                </div>
+                <div style={{ flex: 1, overflowY: 'auto', padding: '12px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {files.map(f => (
+                    <div key={f._id} style={{ ...s.fileCard, padding: '10px' }}>
+                      <div style={{ ...s.fileIcon, width: '32px', height: '32px', fontSize: '16px' }}>📄</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <p style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {f.originalName}
+                        </p>
+                        <p style={{ fontSize: '10px', color: 'var(--text3)' }}>
+                          {(f.size / 1024 / 1024).toFixed(2)} MB • {f.uploader?.name}
+                        </p>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <a href={`http://localhost:5000/uploads/${f.filename}`} download target="_blank" rel="noreferrer" className="btn btn-ghost" style={{ padding: '2px 6px', fontSize: '10px', minHeight: 'auto', height: 'auto' }}>⬇️</a>
+                        {(isLeader || (f.uploader?._id || f.uploader) === user.id) && (
+                          <button onClick={() => deleteFile(f._id)} className="btn btn-ghost" style={{ padding: '2px 6px', fontSize: '10px', minHeight: 'auto', height: 'auto', color: 'var(--red)' }}>✕</button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {files.length === 0 && (
+                    <div style={{ textAlign: 'center', padding: '30px 10px', color: 'var(--text3)', fontSize: '12px' }}>
+                      No files uploaded yet.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
           {panel === 'chat' && (
             <div style={s.sidePanel} className="fade-up">
-              <ChatBox projectId={id} onClose={() => setPanel(null)} />
+              <ChatBox projectId={id} members={project?.members || []} onClose={() => setPanel(null)} />
             </div>
           )}
           {panel === 'activity' && (
@@ -552,4 +656,8 @@ const s = {
   taskTabBtn:  { padding: '5px 12px', fontSize: '12px', borderRadius: '99px', cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.15s ease', display: 'flex', alignItems: 'center', border: '1px solid transparent' },
   taskGrid:    { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '10px', padding: '12px' },
   taskCard:    { background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '10px', padding: '12px 14px', transition: 'box-shadow 0.15s ease' },
+  viewBtn:     { padding: '4px 12px', fontSize: '12px', fontWeight: '600', borderRadius: 'var(--radius)', border: 'none', cursor: 'pointer', transition: 'all 0.15s' },
+  filesZone:   { border: '2px dashed', borderRadius: 'var(--radius-xl)', overflow: 'hidden', minHeight: '500px', transition: 'all 0.2s' },
+  fileCard:    { display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)' },
+  fileIcon:    { width: '36px', height: '36px', borderRadius: '8px', background: 'var(--bg4)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px' }
 };

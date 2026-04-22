@@ -1,4 +1,6 @@
 const Message = require('../models/Message');
+const Project = require('../models/Project');
+const Notification = require('../models/Notification');
 
 const socketHandler = (io) => {
   io.on('connection', (socket) => {
@@ -7,6 +9,11 @@ const socketHandler = (io) => {
     // Join a project room
     socket.on('joinRoom', (projectId) => {
       socket.join(projectId);
+    });
+
+    // Join personal user room for direct notifications
+    socket.on('joinUserRoom', (userId) => {
+      socket.join(userId);
     });
 
     // Send message
@@ -24,6 +31,32 @@ const socketHandler = (io) => {
         createdAt: message.createdAt,
         reactions: []
       });
+
+      // Process mentions
+      try {
+        const project = await Project.findById(projectId).populate('members', 'name _id');
+        if (project) {
+          for (const member of project.members) {
+            if (member._id.toString() !== senderId.toString() && content.includes(`@${member.name}`)) {
+              const notif = await Notification.create({
+                recipient: member._id,
+                sender: senderId,
+                project: projectId,
+                type: 'mention',
+                message: content.substring(0, 50) + (content.length > 50 ? '...' : '')
+              });
+              
+              const popNotif = await Notification.findById(notif._id)
+                .populate('sender', 'name')
+                .populate('project', 'name');
+                
+              io.to(member._id.toString()).emit('notification', popNotif);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Mention processing error:', err);
+      }
     });
 
     // React to message

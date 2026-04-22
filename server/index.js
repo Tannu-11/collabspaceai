@@ -5,6 +5,7 @@ const dotenv = require('dotenv');
 const http = require('http');
 const { Server } = require('socket.io');
 const socketHandler = require('./socket/socketHandler');
+const path = require('path');
 
 dotenv.config();
 
@@ -26,6 +27,10 @@ app.use('/api/tasks',    require('./routes/tasks'));
 app.use('/api/messages', require('./routes/messages'));
 app.use('/api/ai',       require('./routes/ai'));
 app.use('/api/activity', require('./routes/activity'));
+app.use('/api/files',    require('./routes/files'));
+app.use('/api/notifications', require('./routes/notifications'));
+
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 socketHandler(io);
 
