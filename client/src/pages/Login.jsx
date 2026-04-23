@@ -27,7 +27,7 @@ export default function Login() {
   return (
     <div style={s.page}>
       {/* Left panel */}
-      <div style={s.left}>
+      <div style ={s.left}>
         <div style={s.leftInner}>
           <div style={s.brand}>
             <div style={s.brandMark}>
